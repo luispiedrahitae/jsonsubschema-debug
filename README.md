@@ -30,7 +30,7 @@ which received a [Distinguished Artifact Award](https://conf.researchr.org/detai
 
 ### Requirements ###
 
-* python 3.8.*
+* Python >=3.8, <=3.11
 * Other python dependencies will be installed during the below setup process
 
 You can either install subschema from the source code from github or the pypy package.
