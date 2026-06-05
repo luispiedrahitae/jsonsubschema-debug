@@ -5,6 +5,7 @@ Created on June 24, 2019
 
 import sys
 import jsonschema
+import jsonsubschema.observability as observability
 
 this = sys.modules[__name__]
 
@@ -24,10 +25,11 @@ def set_json_validator_version(v=jsonschema.Draft4Validator):
 
 # API to set print debugging info?
 def set_debug(b=False):
+    this.PRINT_DB = bool(b)
     if b:
-        this.PRINT_DB = True
+        observability.enable_debug()
     else:
-        this.PRINT_DB = False
+        observability.disable_debug()
 
 
 # API to enable uninhabited types warning?

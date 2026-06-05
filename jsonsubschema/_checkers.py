@@ -16,6 +16,7 @@ import jsonsubschema.config as config
 import jsonsubschema._constants as definitions
 import jsonsubschema._utils as utils
 from jsonsubschema._utils import print_db
+import jsonsubschema.observability as obs
 from jsonsubschema.exceptions import (
     UnsupportedNegatedArray,
     UnsupportedNegatedObject
@@ -37,12 +38,6 @@ class JSONschema(dict, metaclass=UninhabitedMeta):
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
-
-        # Since one might call the below constructor directly
-        # with a jsonschema as the constructor parameter,
-        # we also validate that the actual parameter after
-        # being build into a normal dict, is a valid schema.
-        utils.validate_schema(self)
 
         # Instead of adding enum at every child constructor,
         # do it here once and fir all.
@@ -160,7 +155,12 @@ class JSONschema(dict, metaclass=UninhabitedMeta):
                 or (is_top(self) and not is_top(s)):
             return False
         #
-        return self.subtype_enum(s) and self._isSubtype(s)
+        obs.log_event("subtype.start",
+                      lhs=type(self).__name__, rhs=type(s).__name__)
+        result = self.subtype_enum(s) and self._isSubtype(s)
+        obs.log_event("subtype.result",
+                      lhs=type(self).__name__, rhs=type(s).__name__, result=result)
+        return result
 
     def isSubtype_nonTrivial(self, s):
         return self._isSubtype_nonTrivial(s)
@@ -170,12 +170,13 @@ class JSONschema(dict, metaclass=UninhabitedMeta):
             valid_enum = utils.get_valid_enum_vals(self.enum, s)
             # no need to check individual elements
             # as enum values are unique by definition
-            if len(valid_enum) == len(self.enum):
-                return True
-            else:
-                return False
-        else:
-            return True
+            passed = len(valid_enum) == len(self.enum)
+            obs.log_event("subtype.enum",
+                          lhs_enum=list(self.enum),
+                          valid_in_rhs=valid_enum,
+                          result=passed)
+            return passed
+        return True
 
     def isSubtype_handle_rhs(self, s, isSubtype_cb):
 
@@ -517,7 +518,9 @@ class JSONTypeInteger(JSONTypeNumeric):
     def _join(self, s):
 
         def _joinInteger(s1, s2):
-            print_db("Trying to joinInteger")
+            obs.log_event("join.integer.start", lhs_type=s1.type, rhs_type=s2.type,
+                          lhs_interval=str(s1.interval),
+                          rhs_interval=str(s2.interval) if hasattr(s2, "interval") else "N/A")
             if s2.type == "integer":
                 ret = {}
                 if utils.are_intervals_mergable(s1.interval, s2.interval):
@@ -540,7 +543,10 @@ class JSONTypeInteger(JSONTypeNumeric):
             #         ret = ret.join(i)
             #     return ret
 
-            print_db("NonTrivial is not set")
+            obs.log_failure("join.integer.fallback_anyOf",
+                          lhs_interval=str(s1.interval),
+                          rhs_interval=str(s2.interval) if hasattr(s2, "interval") else "N/A",
+                          reason="intervals not mergeable, falling back to anyOf")
             return JSONanyOf({"anyOf": [s1, s2]})
 
         return _joinInteger(self, s)
@@ -554,14 +560,18 @@ class JSONTypeInteger(JSONTypeNumeric):
                 #
                 is_sub_interval = s1.interval in s2.interval
                 if not is_sub_interval:
-                    print_db("num__00")
+                    obs.log_failure("subtype.integer.range_fail",
+                                  lhs_interval=str(s1.interval), rhs_interval=str(s2.interval),
+                                  reason="LHS range is not contained in RHS range")
                     return False
                 #
                 if (s1.multipleOf == s2.multipleOf) \
                         or (s1.multipleOf != None and s2.multipleOf == None) \
                         or (s1.multipleOf != None and s2.multipleOf != None and s1.multipleOf % s2.multipleOf == 0) \
                         or (s1.multipleOf == None and s2.multipleOf == 1):
-                    print_db("num__01")
+                    obs.log_event("subtype.integer.multipleOf_pass",
+                                  lhs_multipleOf=s1.multipleOf, rhs_multipleOf=s2.multipleOf,
+                                  result=True)
                     return True
             # elif s2.type == "anyOf":
             #     return self._isSubtype_nonTrivial(s)
@@ -571,7 +581,7 @@ class JSONTypeInteger(JSONTypeNumeric):
         return super().isSubtype_handle_rhs(s, _isIntegerSubtype)
 
     def _isSubtype_nonTrivial(self, s):
-        print_db("Nontrivial Integer subtype")
+        obs.log_event("subtype.integer.nontrivial", lhs_type=self.type, rhs_type=s.type)
         if s.type == "anyOf":
             intervals = []
             interval_to_mulofs = {}
@@ -689,27 +699,41 @@ class JSONTypeNumber(JSONTypeNumeric):
                     return super(JSONTypeNumber, s1).subtype_enum(s2)
                 is_sub_interval = s1.interval in s2.interval
                 if not is_sub_interval:
-                    print_db("num__00")
+                    obs.log_failure("subtype.number.range_fail",
+                                  rhs_type="number",
+                                  lhs_interval=str(s1.interval), rhs_interval=str(s2.interval),
+                                  reason="LHS range is not contained in RHS number range")
                     return False
                 #
                 if (s1.multipleOf == s2.multipleOf) \
                         or (s1.multipleOf != None and s2.multipleOf == None) \
                         or (s1.multipleOf != None and s2.multipleOf != None and s1.multipleOf % s2.multipleOf == 0) \
                         or (utils.is_int_equiv(s1.multipleOf) and s2.multipleOf == None):
-                    print_db("num__01")
+                    obs.log_event("subtype.number.multipleOf_pass",
+                                  rhs_type="number",
+                                  lhs_multipleOf=s1.multipleOf, rhs_multipleOf=s2.multipleOf,
+                                  result=True)
                     return True
             elif s2.type == "integer":
                 is_sub_interval = s1.interval in s2.interval
                 if not is_sub_interval:
-                    print_db("num__02")
+                    obs.log_failure("subtype.number.range_fail",
+                                  rhs_type="integer",
+                                  lhs_interval=str(s1.interval), rhs_interval=str(s2.interval),
+                                  reason="LHS range is not contained in RHS integer range")
                     return False
                 #
                 if utils.is_int_equiv(s1.multipleOf) and \
                         (s2.multipleOf == None or ((s1.multipleOf != None and s2.multipleOf != None and s1.multipleOf % s2.multipleOf == 0))):
-                    print_db("num__03")
+                    obs.log_event("subtype.number.multipleOf_pass",
+                                  rhs_type="integer",
+                                  lhs_multipleOf=s1.multipleOf, rhs_multipleOf=s2.multipleOf,
+                                  result=True)
                     return True
             else:
-                print_db("num__04")
+                obs.log_failure("subtype.number.type_mismatch",
+                              lhs_type="number", rhs_type=s2.type,
+                              reason="number cannot be subtype of non-numeric type")
                 return False
 
         return super().isSubtype_handle_rhs(s, _isNumberSubtype)
@@ -1003,62 +1027,81 @@ class JSONTypeArray(JSONschema):
             # -- minItems and maxItems
             is_sub_interval = s1.interval in s2.interval
             if not is_sub_interval:
-                print_db("__01__")
+                obs.log_failure("subtype.array.count_range_fail",
+                              lhs_interval=str(s1.interval), rhs_interval=str(s2.interval),
+                              reason="LHS item-count range is not contained in RHS item-count range")
                 return False
             #
             # -- uniqueItemsue
             # TODO Double-check. Could be more subtle?
             if not s1.uniqueItems and s2.uniqueItems:
-                print_db("__02__")
+                obs.log_failure("subtype.array.uniqueItems_fail",
+                              lhs_uniqueItems=s1.uniqueItems, rhs_uniqueItems=s2.uniqueItems,
+                              reason="RHS requires uniqueItems=True but LHS allows duplicates")
                 return False
             #
             # -- items = {not empty}
             # no need to check additionalItems
             if utils.is_dict(s1.items_):
                 if utils.is_dict(s2.items_):
-                    print_db(s1.items_)
-                    print_db(s2.items_)
+                    obs.log_event("subtype.array.items_compare",
+                                  lhs_items=repr(s1.items_)[:80], rhs_items=repr(s2.items_)[:80])
                     if s1.items_.isSubtype(s2.items_):
-                        print_db("__05__")
+                        obs.log_event("subtype.array.items_schema_pass",
+                                      reason="LHS items schema is subtype of RHS items schema")
                         return True
                     else:
-                        print_db("__06__")
+                        obs.log_failure("subtype.array.items_schema_fail",
+                                      reason="LHS items schema is NOT subtype of RHS items schema")
                         return False
                 elif utils.is_list(s2.items_):
                     if s2.additionalItems == False:
-                        print_db("__07__")
+                        obs.log_failure("subtype.array.additionalItems_blocked",
+                                      lhs_items_type="dict", rhs_additionalItems=False,
+                                      reason="RHS additionalItems=False but LHS has a single dict items schema covering all positions")
                         return False
                     elif s2.additionalItems == True:
                         for i in s2.items_:
                             if not s1.items_.isSubtype(i):
-                                print_db("__08__")
+                                obs.log_failure("subtype.array.list_item_schema_fail",
+                                              lhs_items=repr(s1.items_)[:80], rhs_item=repr(i)[:80],
+                                              reason="LHS items schema is not subtype of a positional element in RHS items list")
                                 return False
-                        print_db("__09__")
+                        obs.log_event("subtype.array.list_items_pass",
+                                      reason="LHS items schema is subtype of all positional elements in RHS items list")
                         return True
                     elif utils.is_dict(s2.additionalItems):
                         for i in s2.items_:
                             if not s1.items_.isSubtype(i):
-                                print_db("__10__")
+                                obs.log_failure("subtype.array.items_vs_additionalItems_fail",
+                                              lhs_items=repr(s1.items_)[:80], rhs_item=repr(i)[:80],
+                                              reason="LHS items not subtype of a RHS list item before falling through to additionalItems")
                                 return False
-                        print_db(type(s1.items_), s1.items_)
-                        print_db(type(s2.additionalItems),
-                                 s2.additionalItems)
+                        obs.log_event("subtype.array.additionalItems_check",
+                                      lhs_items_type=type(s1.items_).__name__, lhs_items=repr(s1.items_)[:80],
+                                      rhs_additionalItems_type=type(s2.additionalItems).__name__,
+                                      rhs_additionalItems=repr(s2.additionalItems)[:80])
                         if s1.items_.isSubtype(s2.additionalItems):
-                            print_db("__11__")
+                            obs.log_event("subtype.array.items_vs_additionalItems_pass",
+                                          reason="LHS items schema is subtype of RHS additionalItems")
                             return True
                         else:
-                            print_db("__12__")
+                            obs.log_failure("subtype.array.items_vs_additionalItems_fail",
+                                          reason="LHS items schema is NOT subtype of RHS additionalItems")
                             return False
             #
             elif utils.is_list(s1.items_):
-                print_db("lhs is list")
+                obs.log_event("subtype.array.lhs_items_is_list", lhs_items_count=len(s1.items_))
                 if utils.is_dict(s2.items_):
                     if s1.additionalItems == False:
                         for i in s1.items_:
                             if not i.isSubtype(s2.items_):
-                                print_db("__13__")
+                                obs.log_failure("subtype.array.list_item_vs_dict_fail",
+                                              lhs_item=repr(i)[:80], rhs_items=repr(s2.items_)[:80],
+                                              reason="An LHS positional items element is not subtype of RHS items schema")
                                 return False
-                        print_db("__14__")
+                        obs.log_event("subtype.array.list_items_vs_dict_pass",
+                                      reason="All LHS positional items elements are subtypes of RHS items schema")
                         return True
                     elif s1.additionalItems == True:
                         for i in s1.items_:
@@ -1080,14 +1123,15 @@ class JSONTypeArray(JSONschema):
                             return False
                 # now lhs and rhs are lists
                 elif utils.is_list(s2.items_):
-                    print_db("lhs & rhs are lists")
+                    obs.log_event("subtype.array.both_items_lists",
+                                  lhs_count=len(s1.items_), rhs_count=len(s2.items_))
                     len1 = len(s1.items_)
                     len2 = len(s2.items_)
                     for i, j in zip(s1.items_, s2.items_):
                         if not i.isSubtype(j):
                             return False
                     if len1 == len2:
-                        print_db("len1 == len2")
+                        obs.log_event("subtype.array.items_lists_equal_length", length=len1)
                         if s1.additionalItems == s2.additionalItems:
                             return True
                         elif s1.additionalItems == True and s2.additionalItems == False:
@@ -1104,9 +1148,13 @@ class JSONTypeArray(JSONschema):
                             elif s2.additionalItems == True:
                                 return True
                             elif not s1.items_[i].isSubtype(s2.additionalItems):
-                                print_db("9999")
+                                obs.log_failure("subtype.array.overflow_item_fail",
+                                              lhs_item=repr(s1.items_[i])[:80],
+                                              rhs_additionalItems=repr(s2.additionalItems)[:80],
+                                              reason="LHS extra positional item is not subtype of RHS additionalItems")
                                 return False
-                        print_db("8888")
+                        obs.log_event("subtype.array.overflow_items_pass",
+                                      reason="All LHS extra positional items are subtypes of RHS additionalItems")
                         return True
                     else:  # len2 > len 1
                         diff = len2 - len1
@@ -1278,9 +1326,9 @@ class JSONTypeObject(JSONschema):
             # Check properties range
             is_sub_interval = s1.interval in s2.interval
             if not is_sub_interval:
-                print_db(s1.interval, s1)
-                print_db(s2.interval, s2)
-                print_db("__00__")
+                obs.log_failure("subtype.object.props_count_fail",
+                              lhs_interval=str(s1.interval), rhs_interval=str(s2.interval),
+                              reason="LHS property-count range is not contained in RHS property-count range")
                 return False
             #
             # else:
@@ -1318,7 +1366,11 @@ class JSONTypeObject(JSONschema):
             # Check that required keys satisfy subtyping.
             # lhs required keys should be superset of rhs required keys.
             if not set(s1.required).issuperset(s2.required):
-                print_db("__02__")
+                missing = list(set(s2.required) - set(s1.required))
+                obs.log_failure("subtype.object.required_fail",
+                              lhs_required=list(s1.required), rhs_required=list(s2.required),
+                              missing=missing,
+                              reason="LHS required keys do not include all RHS required keys")
                 return False
             # If required keys are properly defined, check their corresponding
             # schemas and make sure they are subtypes.
@@ -1332,11 +1384,17 @@ class JSONTypeObject(JSONschema):
                             if lhs_:
                                 if rhs_:
                                     if not lhs_.isSubtype(rhs_):
-                                        print_db(k, "LHS", lhs_, "RHS", rhs_)
-                                        print_db("!!__03__")
+                                        obs.log_failure("subtype.object.required_schema_fail",
+                                                      key=k,
+                                                      lhs_schema=repr(lhs_)[:80],
+                                                      rhs_schema=repr(rhs_)[:80],
+                                                      reason="Schema for required key in LHS is not subtype of RHS schema for the same key")
                                         return False
                                 else:
-                                    print_db("__04__")
+                                    obs.log_failure("subtype.object.required_key_missing_rhs",
+                                                  key=k,
+                                                  lhs_schema=repr(lhs_)[:80],
+                                                  reason="Required key exists in LHS but has no schema in RHS")
                                     return False
 
             extra_keys_on_rhs = set(s2.properties.keys()).difference(
@@ -1357,7 +1415,10 @@ class JSONTypeObject(JSONschema):
                 if is_bot(s1.additionalProperties):
                     continue
                 elif is_top(s1.additionalProperties):
-                    print_db("__06__")
+                    obs.log_failure("subtype.object.extra_rhs_key_fail",
+                                  key=k,
+                                  lhs_additionalProperties="TOP",
+                                  reason="RHS requires key but LHS additionalProperties is TOP — LHS allows any value for that key, not the constrained RHS schema")
                     return False
                 # for s in get_schema_for_key(k, s1):
                 #     if not is_bot(s):
@@ -1377,7 +1438,10 @@ class JSONTypeObject(JSONschema):
                         extra_patterns_on_rhs.remove(k)
             if extra_patterns_on_rhs:
                 if not s1.additionalProperties:
-                    print_db("__07__")
+                    obs.log_failure("subtype.object.extra_rhs_pattern_fail",
+                                  extra_patterns=list(extra_patterns_on_rhs),
+                                  lhs_additionalProperties=False,
+                                  reason="RHS has patterns not covered by LHS patternProperties and LHS additionalProperties=False")
                     return False
                 else:
                     for k in extra_patterns_on_rhs:
@@ -1385,7 +1449,10 @@ class JSONTypeObject(JSONschema):
                             try:  # means regex k is infinite
                                 parse(k).cardinality()
                             except OverflowError:
-                                print_db("__08__")
+                                obs.log_failure("subtype.object.extra_rhs_pattern_infinite_fail",
+                                              pattern=k,
+                                              rhs_pattern_schema=repr(s2.patternProperties[k])[:80],
+                                              reason="RHS pattern has infinite cardinality and LHS additionalProperties cannot cover all strings matching it")
                                 return False
             #
             # missing_props_from_lhs = set(

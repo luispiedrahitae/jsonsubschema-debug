@@ -139,7 +139,7 @@ def canonicalize_list_of_types(d):
     anyofs = []
     for t_i in t:
         if t_i in definitions.Jtypes:
-            s_i = copy.deepcopy(d)
+            s_i = dict(d)  # shallow copy — canonicalize_single_type only reassigns keys/values, never mutates nested structures in-place
             s_i["type"] = t_i
             s_i = canonicalize_single_type(s_i)
             anyofs.append(s_i)

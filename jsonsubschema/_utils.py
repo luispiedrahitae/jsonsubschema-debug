@@ -6,6 +6,7 @@ Created on May 24, 2019
 
 import copy
 import fractions
+import functools
 import math
 import numbers
 import re
@@ -18,6 +19,25 @@ from greenery import parse
 
 import jsonsubschema.config as config
 import jsonsubschema._constants as definitions
+import jsonsubschema.observability as observability
+
+# Cache for compiled (parsed + reduced) greenery FSMs keyed on pattern string.
+# Avoids re-parsing identical patterns across different schema comparisons.
+_greenery_cache: dict = {}
+
+# Cache for validate_schema results keyed on JSON-serialized schema.
+# check_schema() costs ~1ms each; schemas repeat heavily in batch pipelines.
+_validate_cache: dict = {}
+
+# Cache for get_valid_enum_vals results keyed on JSON-serialized schema.
+# Avoids rebuilding Draft4Validator and re-validating each enum item on repeated calls.
+_enum_vals_cache: dict = {}
+
+
+def _compiled_pattern(p: str):
+    if p not in _greenery_cache:
+        _greenery_cache[p] = parse(p).reduce()
+    return _greenery_cache[p]
 
 
 def is_str(i):
@@ -71,25 +91,36 @@ def is_dict(i):
 
 
 def validate_schema(s):
-    return config.VALIDATOR.check_schema(s)
+    try:
+        key = json.dumps(s, sort_keys=True, allow_nan=True)
+    except TypeError:
+        return config.VALIDATOR.check_schema(s)  # non-serializable edge case, skip cache
+    if key not in _validate_cache:
+        _validate_cache[key] = config.VALIDATOR.check_schema(s)
+    return _validate_cache[key]
 
 
 def get_valid_enum_vals(enum, s):
-    # copy eum into set for two reasons:
-    # 1- we need to modify a different copy from what we iterate on
-    # 2- hashing elements into set and back to list will guarantee
-    # the list is ordered and hence JSONschema __eq__ with enums should work.
-    vals = copy.deepcopy(enum)
-    for i in enum:
-        try:
-            jsonschema.validate(instance=i, schema=s)
-        except jsonschema.ValidationError:
-            vals.remove(i)
-    # try:
-    #     return sorted(vals)
-    # except TypeError:
-        # return list(vals)
-    return vals
+    # Build Draft4Validator once per (enum, schema) pair instead of calling
+    # jsonschema.validate() per item. jsonschema.validate() calls check_schema()
+    # internally, which resolves all $ref references in the Draft4 meta-schema —
+    # once per enum value, not once per schema. The schema is already validated by
+    # validate_schema() at this point.
+    #
+    # Cache key includes enum because this function is called from two contexts:
+    # canonicalize_enum (enum == s["enum"]) and subtype_enum (enum == LHS checker
+    # enum, s == RHS schema), so enum and s["enum"] may differ.
+    try:
+        key = (json.dumps(enum, sort_keys=True, allow_nan=True),
+               json.dumps(s, sort_keys=True, allow_nan=True))
+    except TypeError:
+        validator = config.VALIDATOR(s)
+        return [i for i in enum if validator.is_valid(i)]
+
+    if key not in _enum_vals_cache:
+        validator = config.VALIDATOR(s)
+        _enum_vals_cache[key] = [i for i in enum if validator.is_valid(i)]
+    return list(_enum_vals_cache[key])
 
 
 def get_typed_enum_vals(enum, t):
@@ -104,10 +135,9 @@ def get_typed_enum_vals(enum, t):
 
 def print_db(*args):
     if config.PRINT_DB:
-        if args:
-            print("".join(str(arg) + " " for arg in args))
-        else:
-            print()
+        msg = "".join(str(arg) + " " for arg in args) if args else ""
+        print(msg)
+        observability.log_event("debug.internal", msg=msg.strip())
 
 
 # def one(iterable):
@@ -167,9 +197,10 @@ def regex_matches_string(regex=None, s=None):
         return True
 
 
+@functools.lru_cache(maxsize=512)
 def regex_meet(s1, s2):
     if s1 and s2:
-        ret = parse(s1) & parse(s2)
+        ret = _compiled_pattern(s1) & _compiled_pattern(s2)
         return str(ret.reduce()) if not ret.empty() else None
     elif s1:
         return s1
@@ -179,27 +210,28 @@ def regex_meet(s1, s2):
         return None
 
 
+@functools.lru_cache(maxsize=512)
 def regex_isSubset(s1, s2):
     ''' regex subset is quite expensive to compute
         especially for complex patterns. '''
     if s1 and s2:
-        s1 = parse(s1).reduce()
-        s2 = parse(s2).reduce()
+        fsm1 = _compiled_pattern(s1)
+        fsm2 = _compiled_pattern(s2)
         try:
-            s1.cardinality()
-            s2.cardinality()
-            return set(s1.strings()).issubset(s2.strings())
+            fsm1.cardinality()
+            fsm2.cardinality()
+            return set(fsm1.strings()).issubset(fsm2.strings())
         except (OverflowError, Exception):
             # catching a general exception thrown from greenery
             # see https://github.com/qntm/greenery/blob/master/greenery/lego.py
             # ... raise Exception("Please choose an 'otherchar'")
-            return s1.equivalent(s2) or (s1 & s2.everythingbut()).empty()
+            return fsm1.equivalent(fsm2) or (fsm1 & fsm2.everythingbut()).empty()
         except Exception as e:
             exit_with_msg("regex failure from greenry", e)
     elif s1:
         return True
     elif s2:
-        return parse(s2).equivalent(parse(".*"))
+        return _compiled_pattern(s2).equivalent(parse(".*"))
 
 
 # def regex_isProperSubset(s1, s2):
