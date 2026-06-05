@@ -10,7 +10,7 @@ with open("README.md", "r") as fh:
     
 setup(
     name='jsonsubschema',
-    version='0.0.7',
+    version='0.1.0',
     author='Andrew Habib, Avraham Shinnar, Martin Hirzel',
     author_email='andrew.a.habib@gmail.com',
     description="A tool to check whether a JSON schema is subset/subschema of another JSON schema",
@@ -19,6 +19,7 @@ setup(
     url='https://github.com/IBM/jsonsubschema',
     packages=['jsonsubschema', ],
     license='Apache License 2.0',
+    python_requires='>=3.8',
     install_requires=['portion', 'greenery>=4.0.0', 'jsonschema', 'jsonref'],
     entry_points={
         'console_scripts': 'jsonsubschema=jsonsubschema.cli:main'
